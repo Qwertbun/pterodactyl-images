@@ -1,22 +1,129 @@
 #!/bin/bash
-cd /home/container || exit 1
+set -e
 
-# Configure colors
-CYAN='\033[0;36m'
-RESET_COLOR='\033[0m'
+echo "🚀 Запуск сервера с автоматической проверкой зависимостей..."
+echo "📅 Дата: $(date)"
+echo "🔍 Текущая директория: $(pwd)"
+echo "👤 Пользователь: $(whoami)"
+echo "🏠 Домашняя директория: $HOME"
+echo ""
 
-# Print Current Java Version
-java -version
+# Проверка версии Java
+echo "☕ Проверка версии Java:"
+java -version 2>&1 | head -3
+echo ""
 
-# Set environment variable that holds the Internal Docker IP
-INTERNAL_IP=$(ip route get 1 | awk '{print $(NF-2);exit}')
-export INTERNAL_IP
+echo "🔧 Проверка системных зависимостей..."
 
-# Replace Startup Variables
-# shellcheck disable=SC2086
-MODIFIED_STARTUP=$(echo -e ${STARTUP} | sed -e 's/{{/${/g' -e 's/}}/}/g')
-echo -e "${CYAN}STARTUP /home/container: ${MODIFIED_STARTUP} ${RESET_COLOR}"
+# Проверка наличия libssl.so.3
+if [ ! -f "/usr/lib/x86_64-linux-gnu/libssl.so.3" ] && [ ! -f "/lib/x86_64-linux-gnu/libssl.so.3" ]; then
+    echo "⚠️ libssl.so.3 не найдена. Пытаемся автоматически исправить..."
+    
+    # Попытка установить libssl3 (только если есть права root)
+    if command -v apt-get &> /dev/null && [ "$(id -u)" = "0" ]; then
+        echo "📦 Установка libssl3 через apt..."
+        apt-get update
+        apt-get install -y --no-install-recommends libssl3 openssl
+        
+        # Проверка после установки
+        if [ -f "/usr/lib/x86_64-linux-gnu/libssl.so.3" ]; then
+            echo "✅ libssl.so.3 успешно установлена"
+        else
+            echo "❌ Не удалось установить libssl3. Пробуем создать символьные ссылки..."
+            
+            # Поиск существующих версий libssl
+            LIBSSL_PATH=$(find /usr -name "libssl.so*" 2>/dev/null | grep -v "Permission denied" | head -1)
+            if [ -n "$LIBSSL_PATH" ]; then
+                echo "🔍 Найдена библиотека: $LIBSSL_PATH"
+                LIB_DIR=$(dirname "$LIBSSL_PATH")
+                ln -sf "$LIBSSL_PATH" "$LIB_DIR/libssl.so.3"
+                ldconfig
+                echo "✅ Создана символьная ссылка для libssl.so.3"
+            else
+                echo "❌ Не удалось найти подходящие библиотеки OpenSSL!"
+                echo "💡 Рекомендуем использовать Docker образ с предустановленной libssl3 или обновить образ"
+                echo ""
+                echo "📋 Информация для диагностики:"
+                echo "Список SSL библиотек в системе:"
+                find /usr -name "*ssl*" 2>/dev/null | grep -v "Permission denied" || echo "Не найдено"
+                echo ""
+                echo "Пути поиска библиотек:"
+                echo $LD_LIBRARY_PATH
+                echo ""
+                echo "Установленные пакеты OpenSSL:"
+                dpkg -l | grep ssl || echo "Не установлено"
+                exit 1
+            fi
+        fi
+    else
+        echo "🔒 Нет прав для установки пакетов. Проверяем наличие существующих библиотек..."
+        
+        # Поиск всех возможных libssl.so файлов
+        echo "🔍 Поиск существующих SSL библиотек..."
+        FOUND_SSL_LIBS=()
+        while IFS= read -r lib; do
+            FOUND_SSL_LIBS+=("$lib")
+            echo "   - $lib"
+        done < <(find /usr /lib -name "libssl.so*" 2>/dev/null | grep -v "Permission denied")
+        
+        if [ ${#FOUND_SSL_LIBS[@]} -eq 0 ]; then
+            echo "❌ Не найдены SSL библиотеки в системе!"
+            echo "💡 Решение: Используйте Docker образ с предустановленной libssl3"
+            echo "   Рекомендуемый образ: ghcr.io/trenutoo/pterodactyl-images:java_21_dragonwell"
+            exit 1
+        fi
+        
+        echo "✅ Найдены SSL библиотеки. Проверяем совместимость..."
+        
+        # Попытка найти libssl.so.1.1 и создать символьные ссылки
+        for lib in "${FOUND_SSL_LIBS[@]}"; do
+            if [[ "$lib" == *"libssl.so.1.1"* ]]; then
+                echo "🔧 Обнаружена libssl.so.1.1, создаем символьные ссылки для совместимости..."
+                LIB_DIR=$(dirname "$lib")
+                sudo ln -sf "$lib" "$LIB_DIR/libssl.so.3" 2>/dev/null || true
+                sudo ln -sf "$(dirname "$lib")/libcrypto.so.1.1" "$(dirname "$lib")/libcrypto.so.3" 2>/dev/null || true
+                sudo ldconfig 2>/dev/null || true
+                echo "✅ Созданы символьные ссылки для libssl.so.3 и libcrypto.so.3"
+                break
+            fi
+        done
+        
+        # Финальная проверка
+        if [ ! -f "/usr/lib/x86_64-linux-gnu/libssl.so.3" ] && [ ! -f "/lib/x86_64-linux-gnu/libssl.so.3" ]; then
+            echo "❌ Не удалось создать символьные ссылки для libssl.so.3"
+            echo "💡 Рекомендуемое решение:"
+            echo "   1. Используйте готовый образ: ghcr.io/trenutoo/pterodactyl-images:java_21_dragonwell"
+            echo "   2. Или замените базовый образ в Dockerfile на:"
+            echo "      FROM ghcr.io/trenutoo/pterodactyl-images:java_21_dragonwell"
+            exit 1
+        fi
+    fi
+fi
 
-# Run the Server
-# shellcheck disable=SC2086
-eval ${MODIFIED_STARTUP}
+# Дополнительная проверка всех зависимостей для sw_linux_64
+if [ -f "./sw_linux_64" ]; then
+    echo ""
+    echo "🔍 Проверка зависимостей для sw_linux_64:"
+    if command -v ldd &> /dev/null; then
+        ldd ./sw_linux_64 2>&1 | grep -E "(ssl|crypto|not found)"
+    else
+        echo "⚠️ ldd не установлен, пропускаем детальную проверку зависимостей"
+    fi
+fi
+
+echo ""
+echo "✅ Все зависимости проверены. Запуск приложения..."
+echo "==============================================="
+
+# Запуск основного приложения
+if [ -f "./sw_linux_64" ]; then
+    chmod +x ./sw_linux_64 2>/dev/null || true
+    exec ./sw_linux_64
+else
+    echo "❌ Файл sw_linux_64 не найден в текущей директории!"
+    echo "📂 Содержимое директории:"
+    ls -la
+    echo ""
+    echo "💡 Проверьте, что файл sw_linux_64 загружен в сервер"
+    exit 1
+fi
