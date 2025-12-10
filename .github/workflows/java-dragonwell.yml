@@ -55,6 +55,6 @@ jobs:
           push: true
           provenance: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/pterodactyl-images:java_21_dragonwell
+            ghcr.io/qwertbun/pterodactyl-images:java_21_dragonwell
           cache-from: type=gha
           cache-to: type=gha,mode=max
